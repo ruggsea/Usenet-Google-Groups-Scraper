@@ -1,6 +1,5 @@
 import requests
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
 import time, random
 from bs4 import BeautifulSoup
 import csv
@@ -15,6 +14,10 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import NoSuchElementException
 import json
 import csv
+
+from concurrent.futures import ThreadPoolExecutor, wait, ProcessPoolExecutor
+from multiprocessing.pool import Pool
+
 
 #Idea generale
 # 1) Carico un CSV contenente nomenewsgroup,annopartenza
@@ -31,29 +34,40 @@ from selenium import webdriver
 import sys
 
 
-
-
+from tqdm import tqdm
 
 def click_next_page(driver, f):
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    pagina_iniziale = driver.pagina
+    
     try:
         # Wait for the next button to be clickable
         next_button = driver.find_element(By.XPATH, '//div[@role="button" and @aria-label="Next page"]')
         driver.execute_script("arguments[0].scrollIntoView();", next_button)
         driver.execute_script("arguments[0].click();", next_button)
+        # Wait for the page to load
+        if "--verbose" in sys.argv:
+            print("Cliccato su prossima pagina")
+        loaded= False
+        while not loaded:
+            time.sleep(random.uniform(0, 0.5))
+            loaded = driver.execute_script("return document.readyState == 'complete'")
         driver.pagina += 1  # Increment page counter here
+        
     except (TimeoutException, StaleElementReferenceException):
-        print("C'è stato un problema nel caricare la prossima pagina")
+        if "--verbose" in sys.argv:
+            print("C'è stato un problema nel caricare la prossima pagina")
+        # Check if page changed
+        if driver.pagina== pagina_iniziale:
+            if "--verbose" in sys.argv:
+                print("Non è cambiata la pagina, riprovo")
+            click_next_page(driver, f)
         pass
-    is_loading = driver.execute_script("return document.readyState != 'complete'")
-    while is_loading:
-        # Wait for a short interval between 0 and 1 seconds
-        time.sleep(random.uniform(0, 1))
-        is_loading = driver.execute_script("return document.readyState != 'complete'")
 
 
 
-def scrape_month(newsgroup,year,month,f, driver):
+
+def scrape_month(group,year,month,f, driver):
    #inizializzo i contatori
     driver.pagina = 0
     flag = 0
@@ -70,127 +84,75 @@ def scrape_month(newsgroup,year,month,f, driver):
     next_month_string = str(next_month) if next_month >= 10 else f"0{next_month}"
 
     # Formatta l'URL utilizzando le variabili appena calcolate
-    url = f"{base_url}{newsgroup}/search?q=after%3A{year}-{month_string}-01%20before%3A{next_year}-{next_month_string}-01"
+    url = f"{base_url}{group}/search?q=after%3A{year}-{month_string}-01%20before%3A{next_year}-{next_month_string}-01"
 
     driver.get(url)
     time.sleep(1)
 
-    #Salvo la data e il titolo  del primo messaggio, in modo da evitare un loop infinito se Google Groups decide di ritornare a mostrare da capo i messaggi
-    #<div class="tRlaM">28/02/1998</div> contiene la data
-    #t17a0d contiene il titolo
-    #QUESTO METODO NON HA FUNZIONATO
-   # try:
-        # Find the div with class UGgcDd
-        #div_element = driver.find_element(By.CLASS_NAME, "ReSblb")
 
-        # Find the first element with class "tRlaM" inside the div
-        #first_tRlaM_element = div_element.find_elements(By.CLASS_NAME, "kOkyJc")[0]
-        #data_primo_messaggio_text = first_tRlaM_element.text
-
-        # Find the first element with class "t17a0d" inside the div
-        #first_t17a0d_element = div_element.find_elements(By.CLASS_NAME, "o1DPKc")[0]
-        #testo_primo_messaggio_text = first_t17a0d_element.text
-        
-        # Find the first element with class "ZLl54" inside the div
-        #first_a_element = div_element.find_elements(By.CLASS_NAME, "ZLl54")[0]
-
-        # Get the href attribute of the a element
-        #href_primo_messaggio = first_a_element.get_attribute("href")
-        
-        #print(f"primo: {href_primo_messaggio},{data_primo_messaggio_text}")
-    #except (NoSuchElementException, IndexError):
-        # Handle cases where the div or elements are not found
-        #pass
-    #ALTRO METODO: SALVO I LINK DELLA PRIMA PAGINA E VERIFICO CHE NON SI RIPETANO. MENO AFFIDABILE
-
-    while flag == 0:
-        # Primo test: risultati di ricerca finiti
+    total_links = set()
+    skip_to_nextpage = False
+    while flag==0:
+        time.sleep(random.uniform(0, 0.5))
         try:
-            isittheend_element = driver.find_element(By.CLASS_NAME, "ReSblb")
-            isittheend_text = isittheend_element.text
-            if isittheend_text == "Try another search":
-                # this is the end, my only friend
-                flag = 1
-        except NoSuchElementException:
-            # Element not found, continue with the rest of the code
-            pass
+            # Find all links containing '/g/it.discussioni.auto/c' in href attribute
+            links = driver.find_elements(By.XPATH, f'//a[contains(@href, "/g/{group}/c")]')
+            # Deduplicate results
+            unique_links = set(link.get_attribute('href') for link in links)
+            if "--verbose" in sys.argv:
+                print(f"Pagina {driver.pagina} trovati {len(unique_links)} link")
 
-        #Secondo test: siamo a una pagina diversa da 0 ma ricompaiono i messaggi che erano a pagina 0
-       # try:
-            # Find the div with class UGgcDd
-            #div_element = driver.find_element(By.CLASS_NAME, "ReSblb")
-
-            # Find the first element with class "tRlaM" inside the div
-           # first_tRlaM_element = div_element.find_elements(By.CLASS_NAME, "kOkyJc")[0]
-           # data_messaggio_text = first_tRlaM_element.text
-
-            # Find the first element with class "t17a0d" inside the div
-            #first_t17a0d_element = div_element.find_elements(By.CLASS_NAME, "o1DPKc")[0]
-            #testo_messaggio_text = first_t17a0d_element.text
-            # Find the first element with class "ZLl54" inside the div
-           # first_a_element = div_element.find_elements(By.CLASS_NAME, "ZLl54")[0]
-
-            # Get the href attribute of the a element
-            #href_messaggio = first_a_element.get_attribute("href")
-           # print(f"ulteriore: {href_messaggio},{data_messaggio_text}")
-
-       # except (NoSuchElementException, IndexError):
-            # Handle cases where the div or elements are not found
-           # pass
-
-        #if pagina>0 and data_messaggio_text==data_primo_messaggio_text and href_messaggio==href_primo_messaggio:
-           # print(f"Messaggio {href_primo_messaggio} del {data_primo_messaggio_text} già apparsa; esco dal ciclo")
-           # flag=1
-           # break
-
-        # Attempt to fetch the links, retrying in case of StaleElementReferenceException
-        while True:
-            time.sleep(random.uniform(0, 0.5))
-            try:
-                # Find all links containing '/g/it.discussioni.auto/c' in href attribute
-                links = driver.find_elements(By.XPATH, f'//a[contains(@href, "/g/{group}/c")]')
-                # Deduplicate results
-                unique_links = set(link.get_attribute('href') for link in links)
-                if driver.pagina==0:
-                    unique_first_links=unique_links
-                    print("Ho memorizzato i primi link")
-                    for link in unique_first_links:
-                        print(link)
-                    # Skippo la pagina se vuota
-                    if len(unique_links) == 0:
-                        flag = 1
+            if driver.pagina==0:
+                unique_first_links=unique_links
+                # Skippo la pagina se vuota
+                if len(unique_links) == 0:
+                    if "--verbose" in sys.argv:
                         print("Pagina vuota, passo al mese successivo")
-                        break
-                    # Salvo i link
-                    for link in unique_links:
-                        f.write(f"{link},{year},{month},{driver.pagina}\n")
-                if driver.pagina>=1:
-                    for link in unique_links:
-                        if link in unique_first_links:
-                            print(f"Link {link} già presente, esco dal ciclo")
-                            flag = 1
-                            break
-                        else:
-                            f.write(f"{link},{year},{month},{driver.pagina}\n")
-                if flag==1:
-                    print("Ho trovato un link già presente, passiamo al mese successivo")
-                    break
-                break
-            except StaleElementReferenceException:
-                # Check if page is loading
-                if driver.execute_script("return document.readyState") != "complete":
-                    wait = WebDriverWait(driver, 2)  # Wait for page to load
-                    wait.until(EC.presence_of_element_located((By.ID, "some_element_id")))
-                else:
-                    # Page is loaded, continue with the rest of the code
-                    continue
-            
+                    flag = 1
+                # Salvo i link
+
+            if driver.pagina>=1:
+                # compare overlap between the new links and the ones in the first page
+                overlap = unique_links.intersection(unique_first_links)                
+                # flag=1 if the overlap is more than half the links in the page + 1
+                if len(overlap) > (len(unique_links) / 2 + 1):
+                    if "--verbose" in sys.argv:
+                        print("Più della metà dei link sono ripetuti, passiamo al mese successivo")
+                    flag = 1
+                        
+
+            skip_to_nextpage= True
+
+    
+        except StaleElementReferenceException:
+            if "--verbose" in sys.argv:
+                print("StaleElementReferenceException")
+            # Check if page is loading
+            skip_to_nextpage= False
+
+            if driver.execute_script("return document.readyState") != "complete":
+                wait = WebDriverWait(driver, 2)  # Wait for page to load
+                wait.until(EC.presence_of_element_located((By.ID, "some_element_id")))
+            else:
+                # Page is loaded, continue with the rest of the code
+                continue
+        finally:
+            # add the links to the set and click next page if done with the current one
+            if skip_to_nextpage:
+                total_links.update(unique_links)
+                click_next_page(driver, f)
         
-
-
-            
-        click_next_page(driver, f)
-            
+        
+    if flag==1:
+        if "--verbose" in sys.argv:
+            print("Salvo i link e passo al mese successivo")
+        for link in total_links:
+                f.write(f"{link},{year},{month}\n")
+        if "--verbose" in sys.argv:
+            print(f"Salvato n link: {len(total_links)}")
+            print(f"Finito con il mese {year}-{month}")
+    
+        
 
 
 
@@ -199,10 +161,10 @@ def scrape_month(newsgroup,year,month,f, driver):
 
     
 
-def scrape_year(newsgroup, year, f, driver):
+def scrape_year(group, year, f, driver):
     #Nuovo approccio: provo mese per mese
-    for month in range(1,13,1):
-        scrape_month(newsgroup,year,month,f, driver)
+    for month in tqdm(range(1, 13), desc=f"Scraping {group} in {year}"):
+        scrape_month(group, year, month, f, driver)
 
 
 # Usage example:
@@ -210,29 +172,59 @@ def scrape_year(newsgroup, year, f, driver):
 # scrape_links("your_newsgroup_here", your_year_here)
 
 
+
+def scrape_group(group):
+    # Prepare the Firefox browser
+    options = webdriver.FirefoxOptions()
+    
+    # make it headless if not specified
+    if not "--not-headless" in sys.argv:
+        options.add_argument("-headless") 
+    
+    #options.add_argument("-profile") # non so a cosa serva
+    driver = webdriver.Firefox(options=options)
+    
+    if "--verbose" in sys.argv:
+        print(f"Scraping {group}")
+            # Open a new file to write the links
+    f = open(f"results/lista_link_{group}.csv", "a")
+    f.write("link,anno,mese\n")
+            # Extract newsgroup and year from the link
+            # Scrape the group between 1995 and 2024
+    for year in tqdm(range(1991, 2024), desc=f"Scraping {group} between 1991 and 2024"):
+        if "--verbose" in sys.argv:
+            print(f"Scraping {group} in {year}")
+        scrape_year(group, year, f, driver)
+    if "--verbose" in sys.argv:
+        print(f"Finished scraping {group}")
+    f.close()
+    driver.quit()
+
 # main 
 if __name__ == "__main__":
-    if len(sys.argv) < 1:
-        print("Please provide the filepath of the file feed as a command line argument.")
-        sys.exit(1)
+    if len(sys.argv) < 2:
+        raise ValueError("Please provide the filepath of the file feed as a command line argument.")
     
     feed_filepath = sys.argv[1]
     
-    options = webdriver.FirefoxOptions()
-    #options.add_argument("-profile") # non so a cosa serva
-    driver = webdriver.Firefox(options=options)
-    # open file
-    
-    
+    # check if the results folder exists
+    if not os.path.exists("results"):
+        os.makedirs("results")
+
+    groups = []
     with open(feed_filepath, "r") as feed_file:
         for line in feed_file:
             group = line.strip()
-            f = open(f"lista_link_{group}.csv", "a")
-            f.write("link,anno,mese,pagina\n")
-            # Extract newsgroup and year from the link
-            # Scrape the group between 1995 and 2024
-            for year in range(1995, 2025):
-                scrape_year(group, year, f, driver)
+            groups.append(group)
+            
+        with Pool() as pool:
+            pool.map(scrape_group, groups)
+           
+                
+          
+            
+            
+
+    print("Scraping terminato. Chiudo il browser")
     
-    f.close()
-    driver.quit()
+    
