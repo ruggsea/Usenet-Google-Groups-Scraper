@@ -1,23 +1,27 @@
-import requests
-from requests.adapters import HTTPAdapter
-import time, random
-from bs4 import BeautifulSoup
 import csv
-import re
-import os
-from selenium import webdriver
-from selenium.webdriver.support.select import Select
-from selenium.webdriver.firefox.options import Options
-from selenium.webdriver.firefox.firefox_profile import FirefoxProfile
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import NoSuchElementException
 import json
-import csv
-
-from concurrent.futures import ThreadPoolExecutor, wait, ProcessPoolExecutor
-from multiprocessing.pool import Pool
-
+import os
+import random
+import re
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait
+import multiprocessing as mp
+import requests
+from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from selenium import webdriver
+from selenium.common.exceptions import (NoSuchElementException,
+                                        StaleElementReferenceException,
+                                        TimeoutException)
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.firefox_profile import FirefoxProfile
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.select import Select
+from selenium.webdriver.support.ui import WebDriverWait
+from tqdm import tqdm
 
 #Idea generale
 # 1) Carico un CSV contenente nomenewsgroup,annopartenza
@@ -26,15 +30,8 @@ from multiprocessing.pool import Pool
 
 
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException, TimeoutException
-from selenium import webdriver
-import sys
 
 
-from tqdm import tqdm
 
 def click_next_page(driver, f):
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -94,6 +91,14 @@ def scrape_month(group,year,month,f, driver):
     skip_to_nextpage = False
     while flag==0:
         time.sleep(random.uniform(0, 0.5))
+        
+        # Se c'è scritto "Content unavailable" nella pagina, dà errore
+        if "Content unavailable" in driver.page_source:
+            
+            print(f"\nContent unavailable - skipping group {group}")
+            driver.quit()
+            raise ValueError(f"Content unavailable - Skipping group {group}")
+        
         try:
             # Find all links containing '/g/it.discussioni.auto/c' in href attribute
             links = driver.find_elements(By.XPATH, f'//a[contains(@href, "/g/{group}/c")]')
@@ -104,11 +109,7 @@ def scrape_month(group,year,month,f, driver):
 
             if driver.pagina==0:
                 unique_first_links=unique_links
-                # Skippo la pagina se vuota
-                if len(unique_links) == 0:
-                    if "--verbose" in sys.argv:
-                        print("Pagina vuota, passo al mese successivo")
-                    flag = 1
+                
                 # Salvo i link
 
             if driver.pagina>=1:
@@ -119,7 +120,17 @@ def scrape_month(group,year,month,f, driver):
                     if "--verbose" in sys.argv:
                         print("Più della metà dei link sono ripetuti, passiamo al mese successivo")
                     flag = 1
-                        
+            # Skippo la pagina se vuota
+            if len(unique_links) == 0:
+                if "--verbose" in sys.argv:
+                    print("Pagina vuota, passo al mese successivo")
+                flag = 1     
+            
+            # Se la pagina ha meno di 4 link, passo alla prossima
+            if len(unique_links) < 4:
+                if "--verbose" in sys.argv:
+                    print("Pagina con meno di 4 link, passo al mese successivo")
+                flag = 1
 
             skip_to_nextpage= True
 
@@ -163,7 +174,7 @@ def scrape_month(group,year,month,f, driver):
 
 def scrape_year(group, year, f, driver):
     #Nuovo approccio: provo mese per mese
-    for month in tqdm(range(1, 13), desc=f"Scraping {group} in {year}"):
+    for month in tqdm(range(1, 13), desc=f"Scraping {group} in {year}", position=(mp.current_process().pid)*2):
         scrape_month(group, year, month, f, driver)
 
 
@@ -186,12 +197,17 @@ def scrape_group(group):
     
     if "--verbose" in sys.argv:
         print(f"Scraping {group}")
-            # Open a new file to write the links
-    f = open(f"results/lista_link_{group}.csv", "a")
+        
+    # give error if the file already exists
+    if os.path.exists(f"results/lista_link_{group}.csv"):
+        print(f"\n File results/lista_link_{group}.csv already exists. Skipping {group}")
+        raise ValueError(f"File results/lista_link_{group}.csv already exists. Skipping {group}")        
+    # Open a new file to write the links
+    f = open(f"results/lista_link_{group}.csv", "w")
     f.write("link,anno,mese\n")
             # Extract newsgroup and year from the link
             # Scrape the group between 1995 and 2024
-    for year in tqdm(range(1991, 2024), desc=f"Scraping {group} between 1991 and 2024"):
+    for year in tqdm(range(1991, 2024), desc=f"Scraping {group} between 1991 and 2024", position=(mp.current_process().pid)*2-1):
         if "--verbose" in sys.argv:
             print(f"Scraping {group} in {year}")
         scrape_year(group, year, f, driver)
@@ -217,9 +233,9 @@ if __name__ == "__main__":
             group = line.strip()
             groups.append(group)
             
-        with Pool() as pool:
+        with mp.Pool() as pool:
+            print("Inizio scraping")
             pool.map(scrape_group, groups)
-           
                 
           
             
